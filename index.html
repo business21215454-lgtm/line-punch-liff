@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>定位打卡</title>
+  <!--
+    GPS 定位打卡頁（LIFF）。放在 GitHub Pages，所有客戶共用同一個頁面。
+    每家客戶在 LINE Developers 建立 LIFF 時，Endpoint URL 填：
+      https://<帳號>.github.io/<repo>/?liffId=<LIFF ID>&api=<Apps Script 網頁應用程式網址（要 URL 編碼）>
+    打卡時開啟 https://liff.line.me/<LIFF ID>?action=in（或 out）
+  -->
+  <style>
+    :root {
+      --bg: #f2f4f7;
+      --card: #ffffff;
+      --text: #111111;
+      --muted: #8c8c8c;
+      --in: #06c755;
+      --out: #2f6fed;
+      --warn: #e5484d;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #111418; --card: #1c2026; --text: #f2f4f7; --muted: #9aa3ad; }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
+    }
+    .card {
+      width: 100%;
+      max-width: 360px;
+      padding: 32px 24px;
+      border-radius: 20px;
+      background: var(--card);
+      text-align: center;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+    }
+    .icon { font-size: 56px; line-height: 1; }
+    h1 { margin: 16px 0 8px; font-size: 24px; }
+    p { margin: 0; font-size: 16px; line-height: 1.6; color: var(--muted); white-space: pre-line; }
+    .ok p { color: var(--text); }
+    .error p { color: var(--warn); }
+    button {
+      margin-top: 24px;
+      width: 100%;
+      padding: 14px;
+      border: 0;
+      border-radius: 12px;
+      background: var(--accent, var(--in));
+      color: #fff;
+      font-size: 16px;
+      font-weight: bold;
+    }
+    .spinner {
+      width: 40px;
+      height: 40px;
+      margin: 20px auto 0;
+      border: 4px solid rgba(140, 140, 140, 0.25);
+      border-top-color: var(--accent, var(--in));
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main class="card" id="card">
+    <div class="icon" id="icon">📍</div>
+    <h1 id="title">定位打卡</h1>
+    <p id="msg">準備中…</p>
+    <div class="spinner" id="spinner"></div>
+    <button id="retry" hidden>再試一次</button>
+  </main>
+
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <script>
+    // 參數可能在網址本身，也可能被 LIFF 包在 liff.state 裡
+    function readParams() {
+      const params = new URLSearchParams(location.search);
+      const state = params.get('liff.state');
+      if (state) {
+        const inner = new URLSearchParams(state.slice(state.indexOf('?') + 1));
+        inner.forEach((v, k) => { if (!params.has(k)) params.set(k, v); });
+      }
+      return params;
+    }
+
+    const params = readParams();
+    const action = params.get('action') === 'out' ? 'out' : 'in';
+    const label = action === 'in' ? '上班' : '下班';
+    const $ = id => document.getElementById(id);
+    document.documentElement.style.setProperty('--accent', action === 'in' ? 'var(--in)' : 'var(--out)');
+    $('title').textContent = `${label}打卡`;
+
+    function show(state, message, icon) {
+      $('card').className = 'card ' + (state || '');
+      $('msg').textContent = message;
+      if (icon) $('icon').textContent = icon;
+      $('spinner').hidden = state !== '';
+      $('retry').hidden = state !== 'error';
+    }
+
+    function getPosition() {
+      return new Promise((resolve, reject) => {
+        if (!navigator.geolocation) return reject(new Error('這支手機不支援定位。'));
+        navigator.geolocation.getCurrentPosition(resolve, err => {
+          const messages = {
+            1: '沒有定位權限。\n請到手機「設定 → LINE → 位置」改成允許，再試一次。',
+            2: '暫時抓不到位置，請開啟 GPS 或到窗邊再試一次。',
+            3: '定位逾時，請到訊號較好的地方再試一次。',
+          };
+          reject(new Error(messages[err.code] || '定位失敗，請再試一次。'));
+        }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 });
+      });
+    }
+
+    async function punch() {
+      show('', '正在取得你的位置…', '📍');
+      const position = await getPosition();
+      show('', '正在打卡…', '⏳');
+      const res = await fetch(params.get('api'), {
+        method: 'POST',
+        // 用 text/plain 避免跨網域預檢，Apps Script 一樣讀得到內容
+        body: JSON.stringify({
+          kind: 'liff',
+          action,
+          idToken: liff.getIDToken(),
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          accuracy: position.coords.accuracy,
+        }),
+      });
+      const result = await res.json();
+      if (!result.ok) {
+        show('error', result.message, '⚠️');
+        return;
+      }
+      show('ok', result.message, '✅');
+      // 在聊天室送出一句話，系統會回覆完整的打卡卡片
+      if (liff.isInClient()) {
+        try {
+          await liff.sendMessages([{ type: 'text', text: `📍${label}打卡` }]);
+        } catch (err) {
+          console.warn(err);
+        }
+        setTimeout(() => liff.closeWindow(), 1200);
+      }
+    }
+
+    async function main() {
+      if (!params.get('liffId') || !params.get('api')) {
+        show('error', '打卡頁面的網址設定不完整，請聯絡管理員。', '⚠️');
+        return;
+      }
+      await liff.init({ liffId: params.get('liffId') });
+      if (!liff.isLoggedIn()) {
+        liff.login({ redirectUri: location.href });
+        return;
+      }
+      await punch();
+    }
+
+    $('retry').addEventListener('click', () => punch().catch(err => show('error', err.message, '⚠️')));
+    main().catch(err => show('error', err.message || '發生錯誤，請關掉頁面再試一次。', '⚠️'));
+  </script>
+</body>
+</html>
